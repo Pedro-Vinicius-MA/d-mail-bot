@@ -1,4 +1,5 @@
 import argparse
+from d_mail_search import buscar_contexto
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -136,6 +137,10 @@ class FallTemplateBot2026(ForecastBot):
             prompt = self._get_research_prompt(question, researcher)
 
             if isinstance(researcher, GeneralLlm):
+                # D-MAIL: notícias grátis do DuckDuckGo entram no prompt antes do resumo.
+                contexto = await buscar_contexto(question.question_text)
+                if contexto:
+                    prompt = f"{prompt}\n\n{contexto}"
                 research = await researcher.invoke(prompt)
             elif (
                 researcher == "asknews/news-summaries"
@@ -715,17 +720,24 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        # D-MAIL: cérebros grátis até os créditos da Metaculus (pedir de novo em dez/2026).
+        # Gemini pesquisa e prevê; NVIDIA Nemotron só interpreta as respostas (poupa a cota do Gemini).
+        llms={
+            "default": GeneralLlm(
+                model="gemini/gemini-3.5-flash",
+                temperature=0.3,
+                timeout=120,
+                allowed_tries=3,
+            ),
+            "summarizer": GeneralLlm(model="gemini/gemini-3.5-flash", temperature=0, timeout=120, allowed_tries=3),
+            "researcher": GeneralLlm(model="gemini/gemini-3.5-flash", temperature=0, timeout=120, allowed_tries=3),
+            "parser": GeneralLlm(
+                model="nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+                temperature=0,
+                timeout=120,
+                allowed_tries=3,
+            ),
+        },
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These

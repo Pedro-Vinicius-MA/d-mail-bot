@@ -70,7 +70,8 @@ def check_environment(strict: bool = True) -> None:
 
     has_llm_key = any(
         _is_real_env(k)
-        for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                  "GEMINI_API_KEY", "NVIDIA_NIM_API_KEY")
     )
     if not has_llm_key:
         problems.append(
