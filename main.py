@@ -1,3 +1,4 @@
+import os
 import argparse
 from d_mail_search import buscar_contexto
 import asyncio
@@ -47,6 +48,26 @@ MODELO_NVIDIA = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
 
 
 dotenv.load_dotenv()
+
+
+def _limpar_chave_nvidia() -> None:
+    """D-MAIL: tolera secret colado como linha inteira, com aspas ou espaços,
+    e registra só o formato da chave (nunca o valor)."""
+    bruto = os.environ.get("NVIDIA_NIM_API_KEY", "")
+    chave = bruto.strip()
+    if "=" in chave and not chave.startswith("nvapi-"):
+        chave = chave.split("=", 1)[1].strip()
+    chave = chave.strip("\"'").strip()
+    if chave:
+        os.environ["NVIDIA_NIM_API_KEY"] = chave
+    print(
+        f"[D-MAIL] chave NVIDIA: presente={bool(chave)} comeca_com_nvapi={chave.startswith('nvapi-')} "
+        f"tamanho={len(chave)} (bruto={len(bruto)})",
+        flush=True,
+    )
+
+
+_limpar_chave_nvidia()
 logger = logging.getLogger(__name__)
 
 
