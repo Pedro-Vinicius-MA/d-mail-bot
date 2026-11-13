@@ -42,6 +42,10 @@ from forecasting_tools import (
     structure_output,
 )
 
+# D-MAIL: modelo grátis da NVIDIA (sem limite diário, ~40 chamadas/min).
+MODELO_NVIDIA = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
+
+
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -141,7 +145,17 @@ class FallTemplateBot2026(ForecastBot):
                 contexto = await buscar_contexto(question.question_text)
                 if contexto:
                     prompt = f"{prompt}\n\n{contexto}"
-                research = await researcher.invoke(prompt)
+                try:
+                    research = await researcher.invoke(prompt)
+                except Exception as erro:
+                    # D-MAIL: se a cota grátis do Gemini acabar, a pesquisa cai para a NVIDIA
+                    # em vez de derrubar a pergunta inteira.
+                    logger.warning(
+                        f"Pesquisa com {researcher.model} falhou ({type(erro).__name__}); usando a reserva NVIDIA."
+                    )
+                    research = await GeneralLlm(
+                        model=MODELO_NVIDIA, temperature=0, timeout=180, allowed_tries=3
+                    ).invoke(prompt)
             elif (
                 researcher == "asknews/news-summaries"
                 or researcher == "asknews/deep-research/low-depth"
@@ -721,18 +735,20 @@ if __name__ == "__main__":
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
         # D-MAIL: cérebros grátis até os créditos da Metaculus (pedir de novo em dez/2026).
-        # Gemini pesquisa e prevê; NVIDIA Nemotron só interpreta as respostas (poupa a cota do Gemini).
+        # O Gemini grátis só aguenta 20 chamadas por dia, então fica só com a pesquisa
+        # (1 chamada por pergunta, com reserva NVIDIA). As previsões (5 por pergunta) e a
+        # interpretação das respostas vão para a NVIDIA Nemotron, sem limite diário.
         llms={
             "default": GeneralLlm(
-                model="gemini/gemini-3.5-flash",
+                model=MODELO_NVIDIA,
                 temperature=0.3,
-                timeout=120,
+                timeout=180,
                 allowed_tries=3,
             ),
-            "summarizer": GeneralLlm(model="gemini/gemini-3.5-flash", temperature=0, timeout=120, allowed_tries=3),
-            "researcher": GeneralLlm(model="gemini/gemini-3.5-flash", temperature=0, timeout=120, allowed_tries=3),
+            "summarizer": GeneralLlm(model=MODELO_NVIDIA, temperature=0, timeout=180, allowed_tries=3),
+            "researcher": GeneralLlm(model="gemini/gemini-3.5-flash", temperature=0, timeout=120, allowed_tries=2),
             "parser": GeneralLlm(
-                model="nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+                model=MODELO_NVIDIA,
                 temperature=0,
                 timeout=120,
                 allowed_tries=3,
