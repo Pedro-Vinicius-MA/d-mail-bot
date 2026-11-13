@@ -1,4 +1,5 @@
 import os
+import itertools
 import argparse
 from d_mail_search import buscar_contexto
 import asyncio
@@ -45,6 +46,20 @@ from forecasting_tools import (
 
 # D-MAIL: modelo grátis da NVIDIA (sem limite diário, ~40 chamadas/min).
 MODELO_NVIDIA = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
+
+# D-MAIL: grupo de previsores. A média de modelos diferentes erra menos que um modelo só,
+# porque os vieses de um compensam os do outro. As 5 previsões de cada pergunta alternam
+# entre a Nemotron (rápida) e a Minimax (raciocina mais). Se a Minimax falhar, a Nemotron cobre.
+MODELO_MINIMAX = "nvidia_nim/minimaxai/minimax-m3.1-flash"
+_ORDEM_PREVISORES = [MODELO_NVIDIA, MODELO_MINIMAX, MODELO_NVIDIA, MODELO_MINIMAX, MODELO_NVIDIA]
+_contador_previsoes = itertools.count()
+
+
+def _llm_previsor(modelo: str) -> "GeneralLlm":
+    if modelo == MODELO_MINIMAX:
+        # modelo de raciocínio: precisa de espaço para pensar antes da resposta final
+        return GeneralLlm(model=modelo, temperature=0.3, timeout=300, allowed_tries=2, max_tokens=12000)
+    return GeneralLlm(model=modelo, temperature=0.3, timeout=180, allowed_tries=3)
 
 
 dotenv.load_dotenv()
@@ -151,6 +166,17 @@ class FallTemplateBot2026(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
+
+    async def _prever(self, prompt: str) -> str:
+        """D-MAIL: escolhe o próximo modelo do grupo de previsores."""
+        modelo = _ORDEM_PREVISORES[next(_contador_previsoes) % len(_ORDEM_PREVISORES)]
+        try:
+            return await _llm_previsor(modelo).invoke(prompt)
+        except Exception as erro:
+            if modelo == MODELO_NVIDIA:
+                raise
+            logger.warning(f"Previsão com {modelo} falhou ({type(erro).__name__}); usando a Nemotron.")
+            return await _llm_previsor(MODELO_NVIDIA).invoke(prompt)
 
     ##################################### RESEARCH #####################################
 
@@ -275,7 +301,7 @@ class FallTemplateBot2026(ForecastBot):
         question: BinaryQuestion,
         prompt: str,
     ) -> ReasonedPrediction[float]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._prever(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
             f"""
@@ -357,7 +383,7 @@ class FallTemplateBot2026(ForecastBot):
             {self._create_resolved_question_parsing_message()}
             """
         )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._prever(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         predicted_option_list: PredictedOptionList = await structure_output(
             text_to_structure=reasoning,
@@ -440,7 +466,7 @@ class FallTemplateBot2026(ForecastBot):
         question: NumericQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._prever(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
             f"""
@@ -536,7 +562,7 @@ class FallTemplateBot2026(ForecastBot):
         question: DateQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._prever(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
             f"""
