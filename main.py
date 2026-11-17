@@ -54,6 +54,32 @@ MODELO_MINIMAX = "nvidia_nim/minimaxai/minimax-m3.1-flash"
 _ORDEM_PREVISORES = [MODELO_NVIDIA, MODELO_MINIMAX, MODELO_NVIDIA, MODELO_MINIMAX, MODELO_NVIDIA]
 _contador_previsoes = itertools.count()
 
+# D-MAIL: a NVIDIA grátis aceita ~40 chamadas/min. Na Metaculus Cup são dezenas de perguntas
+# com 5 previsões cada, e o excesso volta como erro 429. Limitamos as chamadas simultâneas e,
+# num 429, esperamos e tentamos de novo em vez de perder a pergunta.
+_LIMITE_NVIDIA = asyncio.Semaphore(2)
+_ESPERAS_429 = (20, 40, 60, 90, 120)
+
+
+def _eh_limite(erro: Exception) -> bool:
+    texto = f"{type(erro).__name__} {erro}"
+    return "RateLimit" in texto or "429" in texto or "Too Many Requests" in texto
+
+
+async def _invocar_com_espera(llm: "GeneralLlm", prompt: str) -> str:
+    """Chama o modelo com no máximo 2 chamadas simultâneas e espera a cada erro 429."""
+    for espera in (*_ESPERAS_429, None):
+        try:
+            async with _LIMITE_NVIDIA:
+                return await llm.invoke(prompt)
+        except Exception as erro:
+            if espera is None or not _eh_limite(erro):
+                raise
+            logging.getLogger(__name__).warning(
+                f"{llm.model}: limite de requisições (429); nova tentativa em {espera} s"
+            )
+            await asyncio.sleep(espera)
+
 
 def _llm_previsor(modelo: str) -> "GeneralLlm":
     if modelo == MODELO_MINIMAX:
@@ -171,12 +197,12 @@ class FallTemplateBot2026(ForecastBot):
         """D-MAIL: escolhe o próximo modelo do grupo de previsores."""
         modelo = _ORDEM_PREVISORES[next(_contador_previsoes) % len(_ORDEM_PREVISORES)]
         try:
-            return await _llm_previsor(modelo).invoke(prompt)
+            return await _invocar_com_espera(_llm_previsor(modelo), prompt)
         except Exception as erro:
             if modelo == MODELO_NVIDIA:
                 raise
             logger.warning(f"Previsão com {modelo} falhou ({type(erro).__name__}); usando a Nemotron.")
-            return await _llm_previsor(MODELO_NVIDIA).invoke(prompt)
+            return await _invocar_com_espera(_llm_previsor(MODELO_NVIDIA), prompt)
 
     ##################################### RESEARCH #####################################
 
@@ -200,9 +226,10 @@ class FallTemplateBot2026(ForecastBot):
                     logger.warning(
                         f"Pesquisa com {researcher.model} falhou ({type(erro).__name__}); usando a reserva NVIDIA."
                     )
-                    research = await GeneralLlm(
-                        model=MODELO_NVIDIA, temperature=0, timeout=180, allowed_tries=3
-                    ).invoke(prompt)
+                    research = await _invocar_com_espera(
+                        GeneralLlm(model=MODELO_NVIDIA, temperature=0, timeout=180, allowed_tries=3),
+                        prompt,
+                    )
             elif (
                 researcher == "asknews/news-summaries"
                 or researcher == "asknews/deep-research/low-depth"
