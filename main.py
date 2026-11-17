@@ -58,7 +58,7 @@ _contador_previsoes = itertools.count()
 # com 5 previsões cada, e o excesso volta como erro 429. Limitamos as chamadas simultâneas e,
 # num 429, esperamos e tentamos de novo em vez de perder a pergunta.
 _LIMITE_NVIDIA = asyncio.Semaphore(2)
-_ESPERAS_429 = (20, 40, 60, 90, 120)
+_ESPERAS_429 = (20, 40, 60, 90, 120, 180, 240)
 
 
 def _eh_limite(erro: Exception) -> bool:
@@ -877,7 +877,17 @@ if __name__ == "__main__":
             )
         )
 
-    template_bot.log_report_summary(forecast_reports)
+    # D-MAIL: 1 pergunta perdida em dezenas não deve marcar a rodada como falha.
+    # Só falha se mais de 10% das perguntas derem erro (aí algo está realmente quebrado).
+    erros = [r for r in forecast_reports if isinstance(r, BaseException)]
+    try:
+        template_bot.log_report_summary(forecast_reports)
+    except RuntimeError:
+        if len(erros) > 0.1 * max(len(forecast_reports), 1):
+            raise
+        logger.warning(
+            f"{len(erros)} de {len(forecast_reports)} perguntas falharam (<=10%); rodada considerada OK."
+        )
     print_run_summary_banner(
         forecast_reports,
         will_publish=publish_to_metaculus,
