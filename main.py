@@ -57,7 +57,6 @@ _contador_previsoes = itertools.count()
 # D-MAIL: a NVIDIA grátis aceita ~40 chamadas/min. Na Metaculus Cup são dezenas de perguntas
 # com 5 previsões cada, e o excesso volta como erro 429. Limitamos as chamadas simultâneas e,
 # num 429, esperamos e tentamos de novo em vez de perder a pergunta.
-_LIMITE_NVIDIA = asyncio.Semaphore(2)
 _ESPERAS_429 = (20, 40, 60, 90, 120, 180, 240)
 
 
@@ -67,19 +66,47 @@ def _eh_limite(erro: Exception) -> bool:
             or "Timeout" in texto or "timed out" in texto)  # NVIDIA lenta também merece nova tentativa
 
 
-async def _invocar_com_espera(llm: "GeneralLlm", prompt: str) -> str:
-    """Chama o modelo com no máximo 2 chamadas simultâneas e espera a cada erro 429."""
-    for espera in (*_ESPERAS_429, None):
+async def _invocar_com_espera(llm: "GeneralLlm", prompt: str, esperas: tuple = _ESPERAS_429) -> str:
+    """Chama o modelo com no máximo 2 chamadas simultâneas por fornecedor e espera a cada 429/timeout."""
+    trava = _LIMITES.setdefault(llm.model.split("/")[0], asyncio.Semaphore(2))
+    for espera in (*esperas, None):
         try:
-            async with _LIMITE_NVIDIA:
+            async with trava:
                 return await llm.invoke(prompt)
         except Exception as erro:
             if espera is None or not _eh_limite(erro):
                 raise
             logging.getLogger(__name__).warning(
-                f"{llm.model}: limite de requisições (429); nova tentativa em {espera} s"
+                f"{llm.model}: limite/lentidão ({type(erro).__name__}); nova tentativa em {espera} s"
             )
             await asyncio.sleep(espera)
+
+
+# D-MAIL: cadeia de 3 fornecedores independentes. Se a NVIDIA cair, o OpenRouter (outra
+# infraestrutura, mesmo Nemotron grátis) assume; se ele também cair, o Google Gemini.
+_LIMITES: dict = {}
+MODELO_OPENROUTER = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+MODELO_GEMINI = "gemini/gemini-3.5-flash"
+_ESPERAS_CURTAS = (20, 45, 90)  # nos elos intermediários: tenta um pouco e passa adiante
+
+
+async def _invocar_cadeia(primeiro: "GeneralLlm", prompt: str) -> str:
+    """Tenta o modelo indicado e, se falhar, os outros fornecedores da cadeia, em ordem."""
+    elos = [primeiro]
+    if not primeiro.model.startswith("openrouter/"):
+        elos.append(GeneralLlm(model=MODELO_OPENROUTER, temperature=0.3, timeout=240, allowed_tries=2))
+    if not primeiro.model.startswith("gemini/"):
+        elos.append(GeneralLlm(model=MODELO_GEMINI, temperature=0.3, timeout=180, allowed_tries=2))
+    ultimo_erro = None
+    for i, llm in enumerate(elos):
+        try:
+            return await _invocar_com_espera(llm, prompt, _ESPERAS_429 if i == len(elos) - 1 else _ESPERAS_CURTAS)
+        except Exception as erro:  # qualquer falha passa para o próximo fornecedor
+            ultimo_erro = erro
+            logging.getLogger(__name__).warning(
+                f"{llm.model} falhou ({type(erro).__name__}); passando para o próximo fornecedor"
+            )
+    raise ultimo_erro
 
 
 def _llm_previsor(modelo: str) -> "GeneralLlm":
@@ -198,12 +225,10 @@ class FallTemplateBot2026(ForecastBot):
         """D-MAIL: escolhe o próximo modelo do grupo de previsores."""
         modelo = _ORDEM_PREVISORES[next(_contador_previsoes) % len(_ORDEM_PREVISORES)]
         try:
-            return await _invocar_com_espera(_llm_previsor(modelo), prompt)
+            return await _invocar_com_espera(_llm_previsor(modelo), prompt, _ESPERAS_CURTAS)
         except Exception as erro:
-            if modelo == MODELO_NVIDIA:
-                raise
-            logger.warning(f"Previsão com {modelo} falhou ({type(erro).__name__}); usando a Nemotron.")
-            return await _invocar_com_espera(_llm_previsor(MODELO_NVIDIA), prompt)
+            logger.warning(f"Previsão com {modelo} falhou ({type(erro).__name__}); seguindo a cadeia.")
+            return await _invocar_cadeia(_llm_previsor(MODELO_NVIDIA), prompt)
 
     ##################################### RESEARCH #####################################
 
@@ -227,7 +252,7 @@ class FallTemplateBot2026(ForecastBot):
                     logger.warning(
                         f"Pesquisa com {researcher.model} falhou ({type(erro).__name__}); usando a reserva NVIDIA."
                     )
-                    research = await _invocar_com_espera(
+                    research = await _invocar_cadeia(
                         GeneralLlm(model=MODELO_NVIDIA, temperature=0, timeout=180, allowed_tries=3),
                         prompt,
                     )
