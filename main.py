@@ -63,7 +63,8 @@ _ESPERAS_429 = (20, 40, 60, 90, 120, 180, 240)
 
 def _eh_limite(erro: Exception) -> bool:
     texto = f"{type(erro).__name__} {erro}"
-    return "RateLimit" in texto or "429" in texto or "Too Many Requests" in texto
+    return ("RateLimit" in texto or "429" in texto or "Too Many Requests" in texto
+            or "Timeout" in texto or "timed out" in texto)  # NVIDIA lenta também merece nova tentativa
 
 
 async def _invocar_com_espera(llm: "GeneralLlm", prompt: str) -> str:
@@ -883,10 +884,11 @@ if __name__ == "__main__":
     try:
         template_bot.log_report_summary(forecast_reports)
     except RuntimeError:
-        if len(erros) > 0.1 * max(len(forecast_reports), 1):
+        # pergunta que falha volta na rodada seguinte; só é problema real se forem várias
+        if len(erros) >= 3 and len(erros) > 0.1 * max(len(forecast_reports), 1):
             raise
         logger.warning(
-            f"{len(erros)} de {len(forecast_reports)} perguntas falharam (<=10%); rodada considerada OK."
+            f"{len(erros)} de {len(forecast_reports)} perguntas falharam; voltam na próxima rodada. Rodada considerada OK."
         )
     print_run_summary_banner(
         forecast_reports,
